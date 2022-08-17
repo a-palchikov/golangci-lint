@@ -17,7 +17,9 @@ import (
 
 	"github.com/golangci/golangci-lint/pkg/config"
 	"github.com/golangci/golangci-lint/pkg/exitcodes"
+	"github.com/golangci/golangci-lint/pkg/golinters"
 	"github.com/golangci/golangci-lint/pkg/lint"
+	"github.com/golangci/golangci-lint/pkg/lint/linter"
 	"github.com/golangci/golangci-lint/pkg/lint/lintersdb"
 	"github.com/golangci/golangci-lint/pkg/logutils"
 	"github.com/golangci/golangci-lint/pkg/packages"
@@ -341,9 +343,13 @@ func (e *Executor) runAnalysis(ctx context.Context, args []string) ([]result.Iss
 		return nil, err
 	}
 
+	var typecheck *linter.Config
 	for _, lc := range e.DBManager.GetAllSupportedLinterConfigs() {
 		isEnabled := enabledLintersMap[lc.Name()] != nil
 		e.reportData.AddLinter(lc.Name(), isEnabled, lc.EnabledByDefault)
+		if lc.Name() == typecheckLinterName {
+			typecheck = lc
+		}
 	}
 
 	lintCtx, err := e.contextLoader.Load(ctx, lintersToRun)
@@ -351,6 +357,18 @@ func (e *Executor) runAnalysis(ctx context.Context, args []string) ([]result.Iss
 		return nil, errors.Wrap(err, "context loading failed")
 	}
 	lintCtx.Log = e.log.Child("linters context")
+
+	// Run prelimiary typechecking to avoid spurious compiler errors multipled
+	// by each enabled linter
+	if typecheck != nil {
+		prerunIssues, err := typecheck.Linter.Run(ctx, lintCtx)
+		if err != nil {
+			return nil, errors.Wrap(err, "preliminary typechecking failed")
+		}
+		if len(prerunIssues) != 0 {
+			return processors.NewFixer(e.cfg, e.log, e.fileCache).Process(prerunIssues), nil
+		}
+	}
 
 	runner, err := lint.NewRunner(e.cfg, e.log.Child("runner"),
 		e.goenv, e.EnabledLintersSet, e.lineCache, e.DBManager, lintCtx.Packages)
@@ -613,3 +631,5 @@ func watchResources(ctx context.Context, done chan struct{}, logger logutils.Log
 	logger.Infof("Execution took %s", time.Since(startedAt))
 	close(done)
 }
+
+var typecheckLinterName = golinters.NewTypecheck().Name()
